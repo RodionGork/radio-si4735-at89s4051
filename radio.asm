@@ -16,6 +16,7 @@ LED_3 EQU P1.3
 LED_R EQU P1.4
 LEDS_ALL EQU P1
 
+CHANNEL EQU 5Fh ; 0 is FM, 1 - MW/LW, 2 and further - SW
 COMMAND_AREA EQU 60h
 RESPONSE_AREA EQU 70h
 
@@ -63,7 +64,6 @@ MAIN_LOOP:
     MOV LEDS_ALL, #0FFh
     CLR A
     JNB BTN_UP, MAIN_SEEK
-    MOV A, #1000b
     JNB BTN_DOWN, MAIN_SEEK
     SJMP MAIN_NO_SEEK
 MAIN_SEEK:
@@ -86,22 +86,31 @@ RADIO_INIT:
     ; engage RST to ensure restart
     CLR PIN_RST
     MOV R2, #3
-    ACALL WAIT
+    CALL WAIT
     SETB PIN_RST
     MOV R2, #3
-    ACALL WAIT
+    CALL WAIT
     ; powerup receiver - lights led #0
     CLR LED_0
     MOV DPTR, #CMD_POWER_UP_FM
-    ACALL EXEC_CMD
+    ACALL PREPARE_COMMAND
+    CLR A
+    JB BTN_VIEW, POWER_UP_1
+    INC A
+    MOV COMMAND_AREA+2, A ; switch to AM
+POWER_UP_1:
+    MOV CHANNEL, A
+    ACALL EXEC_CMD_PREPARED
     SETB LED_0
-    ; set real chip frequeny value - lights led #1
+    ; set real chip frequency value - lights led #1
     CLR LED_1
     MOV DPTR, #CMD_SET_RCLK
     ACALL EXEC_CMD
     SETB LED_1
-    ; tune to band start
+    ; tune to band start - lights led #2
     CLR LED_2
+    MOV A, CHANNEL
+    JNZ POWER_UP_INIT_AM
     MOV DPTR, #CMD_SET_FM_TUNE_BOTTOM
     ACALL EXEC_CMD
     MOV DPTR, #CMD_SET_FM_TUNE_SPACING
@@ -110,6 +119,17 @@ RADIO_INIT:
     ACALL EXEC_CMD
     MOV DPTR, #CMD_FM_TUNE_FREQ
     ACALL EXEC_CMD
+    SJMP POWER_UP_END
+POWER_UP_INIT_AM:
+    MOV DPTR, #CMD_SET_AM_TUNE_BOTTOM
+    ACALL EXEC_CMD
+    MOV DPTR, #CMD_SET_AM_TUNE_TOP
+    ACALL EXEC_CMD
+    MOV DPTR, #CMD_SET_AM_TUNE_SPACING
+    ACALL EXEC_CMD
+    MOV DPTR, #CMD_AM_TUNE_FREQ
+    ACALL EXEC_CMD
+POWER_UP_END:
     SETB LED_2
     POP AR2
     RET
@@ -118,10 +138,15 @@ RADIO_INIT:
 RADIO_SEEK:
     CLR LED_2
     MOV DPTR, #CMD_FM_SEEK_START
+    MOV A, CHANNEL
+    JZ RADIO_SEEK_1
+    MOV DPTR, #CMD_AM_SEEK_START
+RADIO_SEEK_1:
     ACALL PREPARE_COMMAND
-    XRL COMMAND_AREA+2, A
-RADIO_SEEK_DO:
-    ACALL SEND_CMD_AND_WAIT
+    JNB BTN_UP, RADIO_SEEK_2
+    XRL COMMAND_AREA+2, #1000b ; seek down
+RADIO_SEEK_2:
+    ACALL EXEC_CMD_PREPARED
 RADIO_SEEK_WAIT:
     MOV DPTR, #CMD_GET_INT_STATUS
     ACALL EXEC_CMD
@@ -134,6 +159,10 @@ RADIO_SHOW_FREQ:
     PUSH AR0
     PUSH AR2
     MOV DPTR, #CMD_FM_TUNE_STATUS
+    MOV A, CHANNEL
+    JZ SHOW_FREQ_0
+    MOV DPTR, #CMD_AM_TUNE_STATUS
+SHOW_FREQ_0:
     ACALL EXEC_CMD
     MOV R0, #(RESPONSE_AREA+1)
     MOV R2, #5
@@ -170,7 +199,7 @@ SHOW_NIBBLE:
 ;================ prepare and send cmd, and wait
 EXEC_CMD:
     CALL PREPARE_COMMAND
-    CALL SEND_CMD_AND_WAIT
+    CALL EXEC_CMD_PREPARED
     RET
 
 ;================ load command data from code (from DPTR) to memory
@@ -200,7 +229,7 @@ PREP_CMD_LOOP:
     RET
 
 ;================ sends command from CODE_AREA, waits for response (returned in ACC and RESPONSE_AREA)
-SEND_CMD_AND_WAIT:
+EXEC_CMD_PREPARED:
     PUSH AR2
     PUSH AR5
     MOV A, COMMAND_AREA
@@ -378,19 +407,56 @@ CMD_GET_REV:
     DB 1+80h, 10h
 CMD_SET_RCLK:
     DB 6, 12h, 0, 2, 1, 7Ah, 12h
+CMD_GET_INT_STATUS:
+    DB 1, 14h
+
+CMD_FM_TUNE_FREQ:
+    DB 5, 20h, 0, 22h, 2Eh, 0 ; 87.5 Mhz
+CMD_FM_SEEK_START:
+    DB 2, 21h, 1100b
 CMD_SET_FM_TUNE_BOTTOM:
     DB 6, 12h, 0, 14h, 0, 19h, 00h ; from 64MHz
 CMD_SET_FM_TUNE_SPACING:
     DB 6, 12h, 0, 14h, 2, 0h, 05h  ; spacing 50kHz
 CMD_SET_FM_TUNE_RSSI_TSHLD:
-    DB 6, 12h, 0, 14h, 4, 0h, 05h  ;
-CMD_GET_INT_STATUS:
-    DB 1, 14h
-CMD_FM_TUNE_FREQ:
-    DB 4, 20h, 0, 22h, 2Eh ; 87.5
-CMD_FM_SEEK_START:
-    DB 2, 21h, 1100b
+    DB 6, 12h, 0, 14h, 4, 0h, 05h
 CMD_FM_TUNE_STATUS:
     DB 2+70h, 22h, 0
+
+CMD_AM_TUNE_FREQ:
+    DB 6, 40h, 0, 0, 149, 0, 0 ; 149 kHz
+CMD_AM_SEEK_START:
+    DB 6, 41h, 1100b, 0, 0, 0, 0
+CMD_AM_TUNE_STATUS:
+    DB 2+70h, 42h, 0
+CMD_SET_AM_TUNE_BOTTOM:
+    DB 6, 12h, 0, 34h, 0, 0, 149 ; from 149 kHz
+CMD_SET_AM_TUNE_TOP:
+    DB 6, 12h, 0, 34h, 1, 6, 0AEh ; to 1710 kHz
+CMD_SET_AM_TUNE_SPACING:
+    DB 6, 12h, 0, 34h, 2, 0, 1 ; 1 kHz
+    
+AM_BANDS:
+    DW 149, 1710    ; LW / MW
+    DW 2300, 2495   ; 120m
+    DW 3200, 3400   ; 90m
+    DW 3900, 4000   ; 75m
+    DW 4750, 4995   ; 60m
+    DW 5900, 6200   ; 49m
+    DW 7200, 7450   ; 41m
+    DW 9400, 9900   ; 31m
+    DW 11600, 12100 ; 25m
+    DW 13570, 13870 ; 22m
+    DW 15100, 15830 ; 19m
+    DW 17480, 17900 ; 16m
+    DW 18900, 19020 ; 15m
+    DW 21450, 21850 ; 13m
+    DW 25670, 26100 ; 11m
+
+CODE_SIZE MACRO CUR
+$WARNING (&CUR& BYTES)
+ENDM
+
+CODE_SIZE %$
 
 END
