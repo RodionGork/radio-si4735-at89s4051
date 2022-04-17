@@ -16,6 +16,7 @@ LED_3 EQU P1.3
 LED_R EQU P1.4
 LEDS_ALL EQU P1
 
+COMMAND_AREA EQU 60h
 RESPONSE_AREA EQU 70h
 
 ORG 0
@@ -62,7 +63,7 @@ MAIN_LOOP:
     MOV LEDS_ALL, #0FFh
     CLR A
     JNB BTN_UP, MAIN_SEEK
-    CPL A
+    MOV A, #1000b
     JNB BTN_DOWN, MAIN_SEEK
     SJMP MAIN_NO_SEEK
 MAIN_SEEK:
@@ -92,23 +93,23 @@ RADIO_INIT:
     ; powerup receiver - lights led #0
     CLR LED_0
     MOV DPTR, #CMD_POWER_UP_FM
-    ACALL SEND_CMD_AND_WAIT
+    ACALL EXEC_CMD
     SETB LED_0
     ; set real chip frequeny value - lights led #1
     CLR LED_1
     MOV DPTR, #CMD_SET_RCLK
-    ACALL SEND_CMD_AND_WAIT
+    ACALL EXEC_CMD
     SETB LED_1
     ; tune to band start
     CLR LED_2
     MOV DPTR, #CMD_SET_FM_TUNE_BOTTOM
-    ACALL SEND_CMD_AND_WAIT
+    ACALL EXEC_CMD
     MOV DPTR, #CMD_SET_FM_TUNE_SPACING
-    ACALL SEND_CMD_AND_WAIT
+    ACALL EXEC_CMD
     MOV DPTR, #CMD_SET_FM_TUNE_RSSI_TSHLD
-    ACALL SEND_CMD_AND_WAIT
+    ACALL EXEC_CMD
     MOV DPTR, #CMD_FM_TUNE_FREQ
-    ACALL SEND_CMD_AND_WAIT
+    ACALL EXEC_CMD
     SETB LED_2
     POP AR2
     RET
@@ -117,13 +118,13 @@ RADIO_INIT:
 RADIO_SEEK:
     CLR LED_2
     MOV DPTR, #CMD_FM_SEEK_START
-    JZ RADIO_SEEK_UP
-    MOV DPTR, #CMD_FM_SEEK_START_DN
-RADIO_SEEK_UP:
+    ACALL PREPARE_COMMAND
+    XRL COMMAND_AREA+2, A
+RADIO_SEEK_DO:
     ACALL SEND_CMD_AND_WAIT
 RADIO_SEEK_WAIT:
     MOV DPTR, #CMD_GET_INT_STATUS
-    ACALL SEND_CMD_AND_WAIT
+    ACALL EXEC_CMD
     JNB ACC.0, RADIO_SEEK_WAIT
     SETB LED_2
     RET
@@ -133,7 +134,7 @@ RADIO_SHOW_FREQ:
     PUSH AR0
     PUSH AR2
     MOV DPTR, #CMD_FM_TUNE_STATUS
-    ACALL SEND_CMD_AND_WAIT
+    ACALL EXEC_CMD
     MOV R0, #(RESPONSE_AREA+1)
     MOV R2, #5
 SHOW_FREQ_1:
@@ -166,12 +167,43 @@ SHOW_NIBBLE:
     POP ACC
     RET
 
-;================ sends command from code at DPTR (destroyed), waits for response (returned in ACC and RESPONSE_AREA)
+;================ prepare and send cmd, and wait
+EXEC_CMD:
+    CALL PREPARE_COMMAND
+    CALL SEND_CMD_AND_WAIT
+    RET
+
+;================ load command data from code (from DPTR) to memory
+PREPARE_COMMAND:
+    PUSH AR0
+    PUSH AR2
+    PUSH AR3
+    PUSH ACC
+    MOV R0, #COMMAND_AREA
+    CLR A
+    MOVC A, @A+DPTR
+    MOV @R0, A
+    ANL A, #0Fh
+    MOV R3, A
+    MOV R2, #0
+PREP_CMD_LOOP:
+    INC R2
+    MOV A, R2
+    MOVC A, @A+DPTR
+    INC R0
+    MOV @R0, A
+    DJNZ R3, PREP_CMD_LOOP
+    POP ACC
+    POP AR3
+    POP AR2
+    POP AR0
+    RET
+
+;================ sends command from CODE_AREA, waits for response (returned in ACC and RESPONSE_AREA)
 SEND_CMD_AND_WAIT:
     PUSH AR2
     PUSH AR5
-    CLR A
-    MOVC A, @A+DPTR
+    MOV A, COMMAND_AREA
     SWAP A
     ANL A, #0Fh
     MOV R5, A
@@ -185,12 +217,11 @@ SEND_CMD_WAIT_LOOP:
     POP AR2
     RET
 
-;================ sends command from code at DPTR (destroyed)
+;================ sends command from COMMAND_AREA
 I2C_CMD:
     PUSH AR3
-    PUSH AR4
-    CLR A
-    MOVC A, @A+DPTR
+    MOV R0, #COMMAND_AREA
+    MOV A, @R0
     ANL A, #0Fh
     MOV R3, A
     CLR PIN_SDA
@@ -199,18 +230,15 @@ I2C_CMD:
     ACALL I2C_DELAY
     MOV A, #22h
     ACALL I2C_WRITE
-    MOV R4, #1
 I2C_CMD_LOOP:
-    MOV A, R4
-    INC R4
-    MOVC A, @A+DPTR
+    INC R0
+    MOV A, @R0
     ACALL I2C_WRITE
     DJNZ R3, I2C_CMD_LOOP
     SETB PIN_SCL
     ACALL I2C_DELAY
     SETB PIN_SDA
     ACALL I2C_DELAY
-    POP AR4
     POP AR3
     RET
 
@@ -362,8 +390,6 @@ CMD_FM_TUNE_FREQ:
     DB 4, 20h, 0, 22h, 2Eh ; 87.5
 CMD_FM_SEEK_START:
     DB 2, 21h, 1100b
-CMD_FM_SEEK_START_DN:
-    DB 2, 21h, 100b
 CMD_FM_TUNE_STATUS:
     DB 2+70h, 22h, 0
 
